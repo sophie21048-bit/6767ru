@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Доступный маршрут</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- ЛЕВАЯ ПАНЕЛЬ -->
+    <aside class="panel">
+
+        <div class="panel-header">
+            <h1>Проверим маршрут</h1>
+            <p>Введи, откуда и куда хочешь проехать, и мы покажем, где на пути будут проблемы для коляски</p>
+        </div>
+
+        <div class="panel-body">
+
+            <div class="field">
+                <label for="fromInput">Откуда</label>
+                <input id="fromInput" type="text" placeholder="Например: ул. Тверская, 1">
+            </div>
+
+            <div class="field">
+                <label for="toInput">Куда</label>
+                <input id="toInput" type="text" placeholder="Например: Красная площадь">
+            </div>
+
+            <button id="checkBtn" class="btn">Проверить доступность</button>
+
+            <div id="result" class="result hidden">
+                <div class="percent-circle" id="percentCircle">
+                    <div class="percent-inner" id="percentValue">0%</div>
+                </div>
+                <p class="percent-caption" id="percentCaption"></p>
+
+                <h3 class="problems-title">Проблемные точки</h3>
+                <ul class="problems" id="problemsList"></ul>
+            </div>
+
+        </div>
+
+    </aside>
+
+    <div id="map"></div>
+
+    <!-- API Яндекс.Карт.
+         ВАЖНО: если ключа нет или он не работает,
+         приложение автоматически перейдёт в демо-режим. -->
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=41783075-2a42-453e-b742-644090ed2baa&lang=ru_RU"></script>
+
+    <script>
+        // =========================================================
+        //  ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+        // =========================================================
+
+        let map = null;
+        let mapObjects = [];
+        let ymapsReady = false;
+
+        // Демо-координаты (Москва) — используются, если геокодер недоступен
+        const DEMO_FROM = [55.7649, 37.6050];   // район Арбата
+        const DEMO_TO   = [55.7522, 37.6156];   // Кремль
+
+        // =========================================================
+        //  ИНИЦИАЛИЗАЦИЯ
+        // =========================================================
+
+        window.addEventListener('load', () => {
+            if (typeof ymaps === 'undefined') {
+                console.warn('ymaps не загрузился. Проверь API-ключ.');
+                document.getElementById('map').innerHTML =
+                    '<div class="map-error">' +
+                    '<b>Карта не загрузилась.</b><br><br>' +
+                    'Скорее всего, не указан или неправильный API-ключ Яндекс.Карт.<br><br>' +
+                    'Но ты можешь нажать «Проверить доступность» — <br>' +
+                    'приложение сработает в демо-режиме без карты.' +
+                    '</div>';
+                return;
+            }
+            ymaps.ready(() => {
+                console.log('ymaps готов');
+                ymapsReady = true;
+                initMap();
+            });
+        });
+
+        function initMap() {
+            map = new ymaps.Map('map', {
+                center: [55.7558, 37.6173],
+                zoom: 12,
+                controls: ['zoomControl', 'geolocationControl']
+            });
+            console.log('Карта создана');
+        }
+
+        // =========================================================
+        //  КНОПКА
+        // =========================================================
+
+        document.getElementById('checkBtn').addEventListener('click', checkRoute);
+
+        async function checkRoute() {
+
+            const from = document.getElementById('fromInput').value.trim();
+            const to   = document.getElementById('toInput').value.trim();
+
+            if (!from || !to) {
+                showToast('Напиши, пожалуйста, откуда и куда ехать');
+                return;
+            }
+
+            const btn = document.getElementById('checkBtn');
+            btn.disabled = true;
+            btn.textContent = 'Ищем маршрут...';
+
+            let fromCoord = null;
+            let toCoord   = null;
+            let usedDemo  = false;
+
+            // ---- 1. Пробуем геокодировать через Яндекс ----
+            if (ymapsReady && typeof ymaps.geocode === 'function') {
+                try {
+                    const [fromRes, toRes] = await Promise.all([
+                        ymaps.geocode(from),
+                        ymaps.geocode(to)
+                    ]);
+
+                    const fromObj = fromRes.geoObjects.get(0);
+                    const toObj   = toRes.geoObjects.get(0);
+
+                    if (fromObj && toObj) {
+                        fromCoord = fromObj.geometry.getCoordinates();
+                        toCoord   = toObj.geometry.getCoordinates();
+                        console.log('Геокодер сработал:', fromCoord, toCoord);
+                    } else {
+                        console.warn('Геокодер не нашёл один из адресов');
+                    }
+                } catch (err) {
+                    console.warn('Ошибка геокодера:', err);
+                }
+            }
+
+            // ---- 2. Если геокодер не сработал — берём демо-координаты ----
+            if (!fromCoord || !toCoord) {
+                fromCoord = DEMO_FROM;
+                toCoord   = DEMO_TO;
+                usedDemo  = true;
+                console.warn('Переходим в демо-режим с фиксированными координатами');
+            }
+
+            // ---- 3. Рисуем всё на карте (если карта есть) ----
+            if (map) {
+                clearMap();
+                drawRoute(fromCoord, toCoord);
+            }
+
+            // ---- 4. Проблемные точки ----
+            const problems = generateProblems(fromCoord, toCoord);
+
+            if (map) {
+                problems.forEach(p => {
+                    addDot([p.lat, p.lng], p.color, p.title, p.desc);
+                });
+            }
+
+            // ---- 5. Процент ----
+            const good = problems.filter(p => p.severity === 'low').length;
+            const percent = Math.round(good / problems.length * 100);
+
+            showResult(percent, problems, usedDemo);
+
+            btn.disabled = false;
+            btn.textContent = 'Проверить доступность';
+        }
+
+        // =========================================================
+        //  ОТРИСОВКА МАРШРУТА
+        // =========================================================
+
+        function drawRoute(fromCoord, toCoord) {
+            const line = new ymaps.Polyline([fromCoord, toCoord], {}, {
+                strokeColor: '#ff4d94',
+                strokeWidth: 5,
+                strokeOpacity: 0.85
+            });
+            map.geoObjects.add(line);
+            mapObjects.push(line);
+
+            addDot(fromCoord, '#ff4d94', 'Откуда', 'Старт маршрута');
+            addDot(toCoord,   '#ff4d94', 'Куда',   'Финиш маршрута');
+
+            map.setBounds(line.geometry.getBounds(), {
+                checkZoomRange: true,
+                zoomMargin: 60
+            });
+        }
+
+        // =========================================================
+        //  ГЕНЕРАЦИЯ ПРОБЛЕМ (имитация)
+        // =========================================================
+
+        function generateProblems(a, b) {
+
+            const variants = [
+                { severity: 'high', color: '#ff3d5a', title: 'Высокий бордюр',
+                  desc: 'Съезда нет. На коляске не проехать' },
+                { severity: 'high', color: '#ff3d5a', title: 'Лестница без пандуса',
+                  desc: 'Только ступеньки, объехать нельзя' },
+                { severity: 'mid',  color: '#ffb020', title: 'Плохое покрытие',
+                  desc: 'Ямы и трещины на тротуаре' },
+                { severity: 'low',  color: '#34c759', title: 'Хороший съезд',
+                  desc: 'Плавный пандус с обеих сторон' },
+                { severity: 'low',  color: '#34c759', title: 'Ровный тротуар',
+                  desc: 'Можно проехать спокойно' }
+            ];
+
+            const count = 5;
+            const result = [];
+
+            for (let i = 1; i <= count; i++) {
+                const t = i / (count + 1);
+                const lat = a[0] + (b[0] - a[0]) * t + (Math.random() - 0.5) * 0.0015;
+                const lng = a[1] + (b[1] - a[1]) * t + (Math.random() - 0.5) * 0.0015;
+
+                const v = variants[Math.floor(Math.random() * variants.length)];
+                result.push({ lat, lng, ...v });
+            }
+
+            return result;
+        }
+
+        // =========================================================
+        //  ТОЧКИ НА КАРТЕ
+        // =========================================================
+
+        function addDot(coord, color, title, desc) {
+            if (!map) return;
+
+            const placemark = new ymaps.Placemark(coord, {
+                hintContent: title,
+                balloonContent: `<b>${title}</b><br>${desc}`
+            }, {
+                iconLayout: 'default#image',
+                iconImageHref: dotSvg(color),
+                iconImageSize: [26, 26],
+                iconImageOffset: [-13, -13]
+            });
+
+            map.geoObjects.add(placemark);
+            mapObjects.push(placemark);
+        }
+
+        function dotSvg(color) {
+            const svg =
+                '<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26">' +
+                '<circle cx="13" cy="13" r="10" fill="' + color + '" stroke="white" stroke-width="3"/>' +
+                '</svg>';
+            return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
+        }
+
+        function clearMap() {
+            if (!map) return;
+            mapObjects.forEach(o => map.geoObjects.remove(o));
+            mapObjects = [];
+        }
+
+        // =========================================================
+        //  ВЫВОД РЕЗУЛЬТАТА
+        // =========================================================
+
+        function showResult(percent, problems, usedDemo) {
+
+            const result = document.getElementById('result');
+            result.classList.remove('hidden');
+
+            const circle = document.getElementById('percentCircle');
+            circle.style.setProperty('--p', percent + '%');
+            document.getElementById('percentValue').textContent = percent + '%';
+
+            let caption = '';
+            if (percent >= 80) caption = 'Маршрут в целом удобный';
+            else if (percent >= 50) caption = 'Есть проблемы, но проехать можно';
+            else caption = 'Лучше выбрать другой путь';
+
+            if (usedDemo) {
+                caption += ' (демо-режим: адреса заменены на пример)';
+            }
+
+            document.getElementById('percentCaption').textContent = caption;
+
+            const list = document.getElementById('problemsList');
+            list.innerHTML = '';
+
+            problems.forEach(p => {
+                const li = document.createElement('li');
+                li.className = 'problem-item';
+                li.innerHTML =
+                    '<span class="dot" style="background:' + p.color + '"></span>' +
+                    '<div>' +
+                        '<div class="problem-title">' + p.title + '</div>' +
+                        '<div class="problem-desc">' + p.desc + '</div>' +
+                    '</div>';
+                list.appendChild(li);
+            });
+        }
+
+        // =========================================================
+        //  СООБЩЕНИЕ СНИЗУ
+        // =========================================================
+
+        function showToast(text) {
+            const t = document.createElement('div');
+            t.className = 'toast';
+            t.textContent = text;
+            document.body.appendChild(t);
+            setTimeout(() => t.classList.add('show'), 10);
+            setTimeout(() => {
+                t.classList.remove('show');
+                setTimeout(() => t.remove(), 300);
+            }, 2500);
+        }
+
+    </script>
+
+</body>
+</html>
